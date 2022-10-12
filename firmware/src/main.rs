@@ -8,11 +8,11 @@ use core::convert::Infallible;
 use cortex_m::delay::Delay;
 use defmt::{error, info, warn};
 use defmt_rtt as _;
+use fugit::MicrosDurationU32;
 use embedded_hal::{
     digital::v2::{InputPin, OutputPin},
     timer::CountDown,
 };
-use embedded_time::duration::Extensions;
 // use panic_reset as _;
 use panic_probe as _;
 use rp2040_hal::{pac, usb::UsbBus, Clock, Watchdog};
@@ -48,7 +48,7 @@ fn panic() -> ! {
 fn main() -> ! {
     info!("Start of main()");
     let mut pac = pac::Peripherals::take().unwrap();
-    let core = pac::CorePeripherals::take().unwrap();
+    let mut core = pac::CorePeripherals::take().unwrap();
 
     let mut watchdog = Watchdog::new(pac.WATCHDOG);
 
@@ -133,13 +133,13 @@ fn main() -> ! {
     ];
 
     // Timer-based resources.
-    let mut delay = cortex_m::delay::Delay::new(core.SYST, clocks.system_clock.freq().0);
+    let mut delay = cortex_m::delay::Delay::new(core.SYST, clocks.system_clock.freq().to_Hz());
 
     let timer = rp2040_hal::Timer::new(pac.TIMER, &mut pac.RESETS);
     let mut scan_countdown = timer.count_down();
 
     // Start on a 500ms countdown so the USB endpoint writes don't block.
-    scan_countdown.start(500.milliseconds());
+    scan_countdown.start(MicrosDurationU32::millis(500));
 
     info!("Start main loop");
 
@@ -152,6 +152,10 @@ fn main() -> ! {
         rp2040_hal::rom_data::reset_to_usb_boot(gpio_activity_pin_mask, disable_interface_mask);
     }
 
+    // unsafe {
+    //     core.NVIC.set_priority(pac::Interrupt::USBCTRL_IRQ, 1);
+    //     pac::NVIC::unmask(pac::Interrupt::USBCTRL_IRQ);
+    // }
     // Main keyboard polling loop.
     loop {
         keyboard_usb_device.poll(&mut [&mut hid_endpoint]);
@@ -163,7 +167,7 @@ fn main() -> ! {
 
             match hid_endpoint.push_input(&report) {
                 Ok(_) => {
-                    scan_countdown.start(8.milliseconds());
+                    scan_countdown.start(MicrosDurationU32::millis(8));
                 },
                 Err(err) => match err {
                     UsbError::WouldBlock => warn!("UsbError::WouldBlock"),
@@ -236,3 +240,8 @@ fn report_from_matrix(matrix: &[[bool; NUM_ROWS]; NUM_COLS]) -> KeyboardReport {
 
     KeyboardReport { modifier, reserved: 0, leds: 0, keycodes }
 }
+
+// #[interrupt]
+// fn USBCTRL_IRQ() {
+
+// }
