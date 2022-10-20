@@ -1,7 +1,6 @@
 use core::{convert::Infallible, ops::Deref};
 
 use cortex_m::delay::Delay;
-use defmt::debug;
 use embedded_hal::digital::v2::InputPin;
 
 use crate::{debounce::Debounce, key_mapping, keyboard::KbHidReport};

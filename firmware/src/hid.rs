@@ -3,19 +3,22 @@
 
 #![allow(missing_docs)]
 
-use usb_device::bus::{InterfaceNumber, StringIndex, UsbBus, UsbBusAllocator};
-use usb_device::class::{ControlIn, ControlOut, UsbClass};
-use usb_device::control;
-use usb_device::control::{Recipient, RequestType};
-use usb_device::descriptor::DescriptorWriter;
-use usb_device::endpoint::{EndpointAddress, EndpointIn};
-use usb_device::UsbError;
+use usb_device::{
+    bus::{InterfaceNumber, StringIndex, UsbBus, UsbBusAllocator},
+    class::{ControlIn, ControlOut, UsbClass},
+    control,
+    control::{Recipient, RequestType},
+    descriptor::DescriptorWriter,
+    endpoint::{EndpointAddress, EndpointIn},
+    UsbError,
+};
 
 const SPECIFICATION_RELEASE: u16 = 0x111;
 const INTERFACE_CLASS_HID: u8 = 0x03;
 
 pub struct Error;
 
+#[allow(unused)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[repr(u8)]
 pub enum Subclass {
@@ -23,6 +26,7 @@ pub enum Subclass {
     BootInterface = 0x01,
 }
 
+#[allow(unused)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[repr(u8)]
 pub enum Protocol {
@@ -110,17 +114,7 @@ pub struct HidClass<'a, B: UsbBus, D: HidDevice> {
 }
 
 impl<B: UsbBus, D: HidDevice> HidClass<'_, B, D> {
-    pub fn new(device: D, alloc: &UsbBusAllocator<B>) -> HidClass<'_, B, D> {
-        let max_packet_size = device.max_packet_size();
-        HidClass {
-            device,
-            interface: alloc.interface(),
-            endpoint_interrupt_in: alloc.interrupt(max_packet_size, 10),
-            expect_interrupt_in_complete: false,
-        }
-    }
-
-    pub fn new_with_polling_interval(device: D, alloc: &UsbBusAllocator<B>, interval: u8) -> HidClass<'_, B, D> {
+    pub fn new(device: D, alloc: &UsbBusAllocator<B>, interval: u8) -> HidClass<'_, B, D> {
         let max_packet_size = device.max_packet_size();
         HidClass {
             device,
@@ -245,15 +239,15 @@ impl<B: UsbBus, D: HidDevice> UsbClass<B> for HidClass<'_, B, D> {
                         xfer.accept_with(descriptor).ok();
                     }
                 }
-            }
+            },
             (RequestType::Class, Recipient::Interface) => {
                 if let Some(request) = Request::new(req.request) {
                     if request == Request::GetReport && req.index == self.interface_index() {
                         self.get_report(xfer);
                     }
                 }
-            }
-            _ => {}
+            },
+            _ => {},
         }
     }
 

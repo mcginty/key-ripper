@@ -2,24 +2,10 @@
 
 use core::ops::Deref;
 
-use crate::{hid::{self, HidDevice, Protocol, ReportType, Subclass}, key_codes::KeyCode};
-
-/// A trait to manage keyboard LEDs.
-///
-/// `()` implements this trait if you don't care of LEDs.
-pub trait Leds {
-    /// Sets the num lock state.
-    fn num_lock(&mut self, _status: bool) {}
-    /// Sets the caps lock state.
-    fn caps_lock(&mut self, _status: bool) {}
-    /// Sets the scroll lock state.
-    fn scroll_lock(&mut self, _status: bool) {}
-    /// Sets the compose state.
-    fn compose(&mut self, _status: bool) {}
-    /// Sets the kana state.
-    fn kana(&mut self, _status: bool) {}
-}
-impl Leds for () {}
+use crate::{
+    hid::{self, HidDevice, Protocol, ReportType, Subclass},
+    key_codes::KeyCode,
+};
 
 #[rustfmt::skip]
 const REPORT_DESCRIPTOR: &[u8] = &[
@@ -58,19 +44,16 @@ const REPORT_DESCRIPTOR: &[u8] = &[
 ];
 
 /// A keyboard HID device.
-pub struct Keyboard<L> {
+pub struct Keyboard {
     report: KbHidReport,
-    leds: L,
 }
 
-impl<L> Keyboard<L> {
+impl Keyboard {
     /// Creates a new `Keyboard` object.
-    pub fn new(leds: L) -> Keyboard<L> {
-        Keyboard {
-            report: KbHidReport::default(),
-            leds,
-        }
+    pub fn new() -> Keyboard {
+        Keyboard { report: KbHidReport::default() }
     }
+
     /// Set the current keyboard HID report.  Returns `true` if it is modified.
     pub fn set_keyboard_report(&mut self, report: KbHidReport) -> bool {
         if report == self.report {
@@ -80,14 +63,9 @@ impl<L> Keyboard<L> {
             true
         }
     }
-
-    /// Returns the underlying leds object.
-    pub fn leds_mut(&mut self) -> &mut L {
-        &mut self.leds
-    }
 }
 
-impl<L: Leds> HidDevice for Keyboard<L> {
+impl HidDevice for Keyboard {
     fn subclass(&self) -> Subclass {
         Subclass::BootInterface
     }
@@ -118,12 +96,6 @@ impl<L: Leds> HidDevice for Keyboard<L> {
         data: &[u8],
     ) -> Result<(), hid::Error> {
         if report_type == ReportType::Output && report_id == 0 && data.len() == 1 {
-            let d = data[0];
-            self.leds.num_lock(d & 1 != 0);
-            self.leds.caps_lock(d & 1 << 1 != 0);
-            self.leds.scroll_lock(d & 1 << 2 != 0);
-            self.leds.compose(d & 1 << 3 != 0);
-            self.leds.kana(d & 1 << 4 != 0);
             return Ok(());
         }
         Err(hid::Error)
@@ -164,6 +136,7 @@ impl KbHidReport {
                 .unwrap_or_else(|| self.set_all(ErrorRollOver)),
         }
     }
+
     fn set_all(&mut self, kc: KeyCode) {
         for c in &mut self.0[2..] {
             *c = kc as u8;

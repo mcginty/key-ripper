@@ -6,15 +6,14 @@
 
 mod debounce;
 mod hid;
-mod hid_descriptor;
-mod keyboard;
 mod key_codes;
 mod key_mapping;
 mod key_scan;
+mod keyboard;
 
 use core::{cell::RefCell, convert::Infallible};
 use critical_section::Mutex;
-use defmt::{error, info, warn, debug};
+use defmt::{debug, error, info};
 use defmt_rtt as _;
 use embedded_hal::digital::v2::{InputPin, OutputPin};
 use hid::HidClass;
@@ -26,12 +25,6 @@ use rp2040_hal::{
     Clock, Watchdog,
 };
 use usb_device::{bus::UsbBusAllocator, device::UsbDeviceBuilder, prelude::*};
-use usbd_hid::{
-    descriptor::KeyboardReport,
-    hid_class::{
-        HidClassSettings, HidCountryCode, HidProtocol, HidSubClass, ProtocolModeConfig,
-    },
-};
 
 use debounce::Debounce;
 use key_scan::KeyScan;
@@ -63,10 +56,11 @@ static mut USB_DEVICE: Option<UsbDevice<usb::UsbBus>> = None;
 static mut USB_BUS: Option<UsbBusAllocator<usb::UsbBus>> = None;
 
 /// The USB Human Interface Device Driver (shared with the interrupt).
-static mut USB_HID: Option<HidClass<usb::UsbBus, keyboard::Keyboard<()>>> = None;
+static mut USB_HID: Option<HidClass<usb::UsbBus, keyboard::Keyboard>> = None;
 
 /// The latest keyboard report for responding to USB interrupts.
-static KEYBOARD_REPORT: Mutex<RefCell<KbHidReport>> = Mutex::new(RefCell::new(KbHidReport::empty()));
+static KEYBOARD_REPORT: Mutex<RefCell<KbHidReport>> =
+    Mutex::new(RefCell::new(KbHidReport::empty()));
 
 #[defmt::panic_handler]
 fn panic() -> ! {
@@ -172,7 +166,7 @@ fn main() -> ! {
         USB_BUS.as_ref().unwrap()
     };
 
-    let hid_endpoint = hid::HidClass::new_with_polling_interval(keyboard::Keyboard::new(()), bus_ref, USB_POLL_RATE_MS);
+    let hid_endpoint = hid::HidClass::new(keyboard::Keyboard::new(), bus_ref, USB_POLL_RATE_MS);
 
     // https://github.com/obdev/v-usb/blob/7a28fdc685952412dad2b8842429127bc1cf9fa7/usbdrv/USB-IDs-for-free.txt#L128
     let keyboard_usb_device = UsbDeviceBuilder::new(bus_ref, UsbVidPid(0x16c0, 0x27db))
@@ -211,8 +205,8 @@ unsafe fn USBCTRL_IRQ() {
     usb_hid.device_mut().set_keyboard_report(report);
     match usb_hid.write(&report) {
         Ok(0) => debug!("WouldBlock"),
-        Ok(_) => {}
-        Err(_) => debug!("ERROR"),
+        Ok(_) => {},
+        Err(_) => error!("USB Write Error"),
     }
 
     usb_dev.poll(&mut [usb_hid]);
