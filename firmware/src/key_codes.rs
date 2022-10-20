@@ -4,7 +4,10 @@ use defmt::Format;
 #[repr(u8)]
 #[derive(Copy, Clone, Format)]
 pub enum KeyCode {
-    Empty = 0x0,
+    Empty = 0x00,
+    ErrorRollOver = 0x01,
+    PostFail = 0x02,
+    ErrorUndefined = 0x03,
     A = 0x04,
     B = 0x05,
     C = 0x06,

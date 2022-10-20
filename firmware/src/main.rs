@@ -5,16 +5,20 @@
 #![no_std]
 
 mod debounce;
+mod hid;
 mod hid_descriptor;
+mod keyboard;
 mod key_codes;
 mod key_mapping;
 mod key_scan;
 
 use core::{cell::RefCell, convert::Infallible};
 use critical_section::Mutex;
-use defmt::{error, info, warn};
+use defmt::{error, info, warn, debug};
 use defmt_rtt as _;
 use embedded_hal::digital::v2::{InputPin, OutputPin};
+use hid::HidClass;
+use keyboard::KbHidReport;
 use panic_probe as _;
 use rp2040_hal::{
     pac::{self, interrupt},
@@ -25,7 +29,7 @@ use usb_device::{bus::UsbBusAllocator, device::UsbDeviceBuilder, prelude::*};
 use usbd_hid::{
     descriptor::KeyboardReport,
     hid_class::{
-        HIDClass, HidClassSettings, HidCountryCode, HidProtocol, HidSubClass, ProtocolModeConfig,
+        HidClassSettings, HidCountryCode, HidProtocol, HidSubClass, ProtocolModeConfig,
     },
 };
 
@@ -59,15 +63,10 @@ static mut USB_DEVICE: Option<UsbDevice<usb::UsbBus>> = None;
 static mut USB_BUS: Option<UsbBusAllocator<usb::UsbBus>> = None;
 
 /// The USB Human Interface Device Driver (shared with the interrupt).
-static mut USB_HID: Option<HIDClass<usb::UsbBus>> = None;
+static mut USB_HID: Option<HidClass<usb::UsbBus, keyboard::Keyboard<()>>> = None;
 
 /// The latest keyboard report for responding to USB interrupts.
-static KEYBOARD_REPORT: Mutex<RefCell<KeyboardReport>> = Mutex::new(RefCell::new(KeyboardReport {
-    modifier: 0,
-    reserved: 0,
-    leds: 0,
-    keycodes: [0u8; 6],
-}));
+static KEYBOARD_REPORT: Mutex<RefCell<KbHidReport>> = Mutex::new(RefCell::new(KbHidReport::empty()));
 
 #[defmt::panic_handler]
 fn panic() -> ! {
@@ -173,17 +172,7 @@ fn main() -> ! {
         USB_BUS.as_ref().unwrap()
     };
 
-    let hid_endpoint = HIDClass::new_with_settings(
-        bus_ref,
-        hid_descriptor::KEYBOARD_REPORT_DESCRIPTOR,
-        USB_POLL_RATE_MS,
-        HidClassSettings {
-            subclass: HidSubClass::NoSubClass,
-            protocol: HidProtocol::Keyboard,
-            config: ProtocolModeConfig::ForceReport,
-            locale: HidCountryCode::US,
-        },
-    );
+    let hid_endpoint = hid::HidClass::new_with_polling_interval(keyboard::Keyboard::new(()), bus_ref, USB_POLL_RATE_MS);
 
     // https://github.com/obdev/v-usb/blob/7a28fdc685952412dad2b8842429127bc1cf9fa7/usbdrv/USB-IDs-for-free.txt#L128
     let keyboard_usb_device = UsbDeviceBuilder::new(bus_ref, UsbVidPid(0x16c0, 0x27db))
@@ -219,20 +208,12 @@ unsafe fn USBCTRL_IRQ() {
     usb_dev.poll(&mut [usb_hid]);
 
     let report = critical_section::with(|cs| *KEYBOARD_REPORT.borrow_ref(cs));
-    if let Err(err) = usb_hid.push_input(&report) {
-        match err {
-            UsbError::WouldBlock => warn!("UsbError::WouldBlock"),
-            UsbError::ParseError => error!("UsbError::ParseError"),
-            UsbError::BufferOverflow => error!("UsbError::BufferOverflow"),
-            UsbError::EndpointOverflow => error!("UsbError::EndpointOverflow"),
-            UsbError::EndpointMemoryOverflow => error!("UsbError::EndpointMemoryOverflow"),
-            UsbError::InvalidEndpoint => error!("UsbError::InvalidEndpoint"),
-            UsbError::Unsupported => error!("UsbError::Unsupported"),
-            UsbError::InvalidState => error!("UsbError::InvalidState"),
-        }
+    usb_hid.device_mut().set_keyboard_report(report);
+    match usb_hid.write(&report) {
+        Ok(0) => debug!("WouldBlock"),
+        Ok(_) => {}
+        Err(_) => debug!("ERROR"),
     }
 
-    // macOS doesn't like it when you don't pull this, apparently.
-    // TODO: maybe even parse something here
-    usb_hid.pull_raw_output(&mut [0; 64]).ok();
+    usb_dev.poll(&mut [usb_hid]);
 }

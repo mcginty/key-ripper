@@ -1,10 +1,10 @@
 use core::{convert::Infallible, ops::Deref};
 
 use cortex_m::delay::Delay;
+use defmt::debug;
 use embedded_hal::digital::v2::InputPin;
-use usbd_hid::descriptor::KeyboardReport;
 
-use crate::{debounce::Debounce, key_mapping};
+use crate::{debounce::Debounce, key_mapping, keyboard::KbHidReport};
 
 #[derive(Clone, Copy)]
 pub struct KeyScan<const NUM_ROWS: usize, const NUM_COLS: usize> {
@@ -46,38 +46,25 @@ impl<const NUM_ROWS: usize, const NUM_COLS: usize> KeyScan<NUM_ROWS, NUM_COLS> {
 }
 
 impl<const NUM_ROWS: usize, const NUM_COLS: usize> From<KeyScan<NUM_ROWS, NUM_COLS>>
-    for KeyboardReport
+    for KbHidReport
 {
     fn from(scan: KeyScan<NUM_ROWS, NUM_COLS>) -> Self {
-        let mut keycodes = [0u8; 6];
-        let mut keycode_index = 0;
-        let mut modifier = 0;
-
-        let mut push_keycode = |key| {
-            if keycode_index < keycodes.len() {
-                keycodes[keycode_index] = key;
-                keycode_index += 1;
-            }
-        };
-
         let layer_mapping = if scan.matrix[0][5] {
             key_mapping::FN_LAYER_MAPPING
         } else {
             key_mapping::NORMAL_LAYER_MAPPING
         };
 
+        let mut report = KbHidReport::default();
+
         for (matrix_column, mapping_column) in scan.matrix.iter().zip(layer_mapping) {
             for (key_pressed, mapping_row) in matrix_column.iter().zip(mapping_column) {
                 if *key_pressed {
-                    if let Some(bitmask) = mapping_row.modifier_bitmask() {
-                        modifier |= bitmask;
-                    } else {
-                        push_keycode(mapping_row as u8);
-                    }
+                    report.pressed(mapping_row);
                 }
             }
         }
 
-        KeyboardReport { modifier, reserved: 0, leds: 0, keycodes }
+        report
     }
 }
