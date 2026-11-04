@@ -190,6 +190,9 @@ fn main() -> ! {
     let keyboard_usb_device = UsbDeviceBuilder::new(bus_ref, UsbVidPid(0x16c0, 0x27db))
         .manufacturer("bschwind")
         .product("key ripper")
+        // Avoids the RP2040 "small max_packet_size_ep0" Set Address race, whose rp2040-hal
+        // workaround depends on the USB interrupt being serviced within microseconds.
+        .max_packet_size_0(64)
         .supports_remote_wakeup(true)
         .build();
     unsafe {
