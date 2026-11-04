@@ -16,10 +16,14 @@ use critical_section::Mutex;
 use defmt::{error, info, warn};
 use defmt_rtt as _;
 use embedded_hal::digital::v2::{InputPin, OutputPin};
+use fugit::{HertzU32, RateExtU32};
 use panic_probe as _;
 use rp2040_hal::{
+    clocks::ClocksManager,
     pac::{self, interrupt},
+    pll::{common_configs::PLL_SYS_125MHZ, setup_pll_blocking, PLLConfig},
     usb::{self, UsbBus},
+    xosc::setup_xosc_blocking,
     Clock, Watchdog,
 };
 use usb_device::{bus::UsbBusAllocator, device::UsbDeviceBuilder, prelude::*};
@@ -88,17 +92,8 @@ fn main() -> ! {
 
     let mut watchdog = Watchdog::new(pac.WATCHDOG);
 
-    let clocks = rp2040_hal::clocks::init_clocks_and_plls(
-        EXTERNAL_CRYSTAL_FREQUENCY_HZ,
-        pac.XOSC,
-        pac.CLOCKS,
-        pac.PLL_SYS,
-        pac.PLL_USB,
-        &mut pac.RESETS,
-        &mut watchdog,
-    )
-    .ok()
-    .unwrap();
+    let clocks =
+        init_clocks(pac.XOSC, pac.CLOCKS, pac.PLL_SYS, pac.PLL_USB, &mut pac.RESETS, &mut watchdog);
 
     // Get the GPIO peripherals.
     let sio = rp2040_hal::Sio::new(pac.SIO);
@@ -261,6 +256,53 @@ impl RemoteWakeup {
             self.signalled = true;
         }
     }
+}
+
+/// PLL_USB configuration for 48MHz with the VCO inside the datasheet's operating range.
+///
+/// rp2040-hal 0.6's `PLL_USB_48MHZ` runs the VCO at 480MHz, below the 750MHz minimum given in later
+/// revisions of the RP2040 datasheet, which can lead to an unreliable USB clock. This matches the
+/// configuration used by the Pico SDK and newer rp2040-hal releases.
+const PLL_USB_48MHZ: PLLConfig =
+    PLLConfig { vco_freq: HertzU32::MHz(1200), refdiv: 1, post_div1: 5, post_div2: 5 };
+
+/// Equivalent to `rp2040_hal::clocks::init_clocks_and_plls`, but with a corrected USB PLL config.
+fn init_clocks(
+    xosc_dev: pac::XOSC,
+    clocks_dev: pac::CLOCKS,
+    pll_sys_dev: pac::PLL_SYS,
+    pll_usb_dev: pac::PLL_USB,
+    resets: &mut pac::RESETS,
+    watchdog: &mut Watchdog,
+) -> ClocksManager {
+    let xosc = setup_xosc_blocking(xosc_dev, EXTERNAL_CRYSTAL_FREQUENCY_HZ.Hz()).ok().unwrap();
+
+    // Configure watchdog tick generation to tick over every microsecond.
+    watchdog.enable_tick_generation((EXTERNAL_CRYSTAL_FREQUENCY_HZ / 1_000_000) as u8);
+
+    let mut clocks = ClocksManager::new(clocks_dev);
+
+    let pll_sys = setup_pll_blocking(
+        pll_sys_dev,
+        xosc.operating_frequency(),
+        PLL_SYS_125MHZ,
+        &mut clocks,
+        resets,
+    )
+    .ok()
+    .unwrap();
+    let pll_usb = setup_pll_blocking(
+        pll_usb_dev,
+        xosc.operating_frequency(),
+        PLL_USB_48MHZ,
+        &mut clocks,
+        resets,
+    )
+    .ok()
+    .unwrap();
+
+    clocks.init_default(&xosc, &pll_sys, &pll_usb).ok().unwrap();
+    clocks
 }
 
 /// Handle USB interrupts, used by the host to "poll" the keyboard for new inputs.
