@@ -5,6 +5,13 @@ authors = ["Brian Schwind <brianmschwind@gmail.com>"]
 edition = "2021"
 license = "MIT OR Apache-2.0 OR Zlib"
 
+# Bare-metal firmware: there's no `test` crate for thumbv6m-none-eabi, so keep
+# `cargo clippy --all-targets` from trying to build test/bench harnesses.
+[[bin]]
+name = "key-ripper"
+test = false
+bench = false
+
 [dependencies]
 cortex-m = "0.7"
 cortex-m-rt = "0.7"
