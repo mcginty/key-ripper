@@ -42,6 +42,11 @@ const DEBOUNCE_MS: u8 = 6;
 
 const DEBOUNCE_TICKS: u8 = DEBOUNCE_MS / (SCAN_LOOP_RATE_MS as u8);
 
+/// USB 2.0 §7.1.7.7: a device must not signal remote wakeup until the bus has been idle for at
+/// least 5ms. The RP2040 reports suspend after ~3ms of idle, so waiting this many scan loops after
+/// that comfortably satisfies the spec.
+const REMOTE_WAKEUP_DELAY_TICKS: u32 = 5;
+
 /// The linker will place this boot block at the start of our program image. We
 /// need this to help the ROM bootloader get our code up and running.
 #[link_section = ".boot2"]
@@ -205,12 +210,64 @@ fn main() -> ! {
         pac::NVIC::unmask(pac::Interrupt::USBCTRL_IRQ);
     }
     info!("Entering main loop");
+    let mut remote_wakeup = RemoteWakeup::default();
     loop {
         let scan = KeyScan::scan(rows, cols, &mut delay, &mut debounce);
+        let report: KeyboardReport = scan.into();
         critical_section::with(|cs| {
-            KEYBOARD_REPORT.replace(cs, scan.into());
+            KEYBOARD_REPORT.replace(cs, report);
+
+            // Note (safety): Interrupts are disabled inside the critical section, so the USB
+            // interrupt handler can't be holding a reference to USB_DEVICE right now.
+            let usb_dev = unsafe { USB_DEVICE.as_ref().unwrap() };
+            remote_wakeup.tick(usb_dev, report_has_keys(&report));
         });
         delay.delay_ms(SCAN_LOOP_RATE_MS);
+    }
+}
+
+/// Tracks USB suspend state from the main loop so that a keypress can wake the host.
+///
+/// This can't live in the USB interrupt handler: no USB interrupts fire while the bus is
+/// suspended, so a keypress during suspend would never be noticed there.
+#[derive(Default)]
+struct RemoteWakeup {
+    /// Number of scan loops the device has been suspended for.
+    suspended_ticks: u32,
+    /// Whether the currently pressed keys have already been "used up": either we signalled wakeup
+    /// for them, or they were already held down when the suspend began. Cleared once all keys are
+    /// released, so only a fresh keypress can wake the host.
+    signalled: bool,
+}
+
+impl RemoteWakeup {
+    fn tick(&mut self, usb_dev: &UsbDevice<usb::UsbBus>, keys_pressed: bool) {
+        if usb_dev.state() != UsbDeviceState::Suspend {
+            *self = Self::default();
+            return;
+        }
+
+        if self.suspended_ticks == 0 {
+            // Keys held as the host suspends (e.g. something resting on the keyboard as the
+            // laptop goes to sleep) must not immediately wake it back up.
+            self.signalled = keys_pressed;
+        }
+        self.suspended_ticks = self.suspended_ticks.saturating_add(1);
+
+        if !keys_pressed {
+            // Re-arm so that a fresh keypress retries if the host ignored the last wakeup.
+            self.signalled = false;
+            return;
+        }
+
+        if !self.signalled
+            && self.suspended_ticks >= REMOTE_WAKEUP_DELAY_TICKS
+            && usb_dev.remote_wakeup_enabled()
+        {
+            info!("Key pressed while suspended, signalling remote wakeup");
+            usb_dev.bus().remote_wakeup();
+            self.signalled = true;
+        }
     }
 }
 
@@ -242,18 +299,9 @@ unsafe fn USBCTRL_IRQ() {
     // macOS doesn't like it when you don't pull this, apparently.
     // TODO: maybe even parse something here
     usb_hid.pull_raw_output(&mut [0; 64]).ok();
-
-    // Wake the host if a key is pressed and the device supports
-    // remote wakeup.
-    if !report_is_empty(&report)
-        && usb_dev.state() == UsbDeviceState::Suspend
-        && usb_dev.remote_wakeup_enabled()
-    {
-        usb_dev.bus().remote_wakeup();
-    }
 }
 
-fn report_is_empty(report: &KeyboardReport) -> bool {
+fn report_has_keys(report: &KeyboardReport) -> bool {
     report.modifier != 0
         || report.keycodes.iter().any(|key| *key != key_codes::KeyCode::Empty as u8)
 }
