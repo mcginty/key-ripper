@@ -53,14 +53,14 @@ const NUM_ROWS: usize = 6;
 
 const EXTERNAL_CRYSTAL_FREQUENCY_HZ: u32 = 12_000_000;
 
-/// The USB Device Driver (shared with the interrupt).
-static mut USB_DEVICE: Option<UsbDevice<usb::UsbBus>> = None;
+/// The USB device and its HID class, shared between the main loop and the USB interrupt.
+struct Usb {
+    device: UsbDevice<'static, usb::UsbBus>,
+    hid: HIDClass<'static, usb::UsbBus>,
+}
 
-/// The USB Bus Driver (shared with the interrupt).
-static mut USB_BUS: Option<UsbBusAllocator<usb::UsbBus>> = None;
-
-/// The USB Human Interface Device Driver (shared with the interrupt).
-static mut USB_HID: Option<HIDClass<usb::UsbBus>> = None;
+/// Set up once in `main()`, before the USB interrupt is unmasked.
+static USB: Mutex<RefCell<Option<Usb>>> = Mutex::new(RefCell::new(None));
 
 /// The latest keyboard report for responding to USB interrupts.
 static KEYBOARD_REPORT: Mutex<RefCell<KeyboardReport>> = Mutex::new(RefCell::new(KeyboardReport {
@@ -165,14 +165,9 @@ fn main() -> ! {
         force_vbus_detect_bit,
         &mut pac.RESETS,
     );
-    let bus_allocator = UsbBusAllocator::new(usb_bus);
-    let bus_ref = unsafe {
-        // Note (safety): This is safe as interrupts haven't been started yet
-        USB_BUS = Some(bus_allocator);
-        // We are promising to the compiler not to take mutable access to this global
-        // variable while this reference exists!
-        USB_BUS.as_ref().unwrap()
-    };
+    // The USB device and class hold references to the bus allocator, so it must live forever.
+    let bus_ref: &'static UsbBusAllocator<UsbBus> =
+        cortex_m::singleton!(: UsbBusAllocator<UsbBus> = UsbBusAllocator::new(usb_bus)).unwrap();
 
     let hid_endpoint = HIDClass::new_with_settings(
         bus_ref,
@@ -192,11 +187,9 @@ fn main() -> ! {
         .product("key ripper")
         .supports_remote_wakeup(true)
         .build();
-    unsafe {
-        // Note (safety): This is safe as interrupts haven't been started yet
-        USB_HID = Some(hid_endpoint);
-        USB_DEVICE = Some(keyboard_usb_device);
-    }
+    critical_section::with(|cs| {
+        USB.replace(cs, Some(Usb { device: keyboard_usb_device, hid: hid_endpoint }));
+    });
     info!("Enabling USB interrupt handler");
     unsafe {
         pac::NVIC::unmask(pac::Interrupt::USBCTRL_IRQ);
@@ -214,16 +207,34 @@ fn main() -> ! {
 /// Handle USB interrupts, used by the host to "poll" the keyboard for new inputs.
 #[allow(non_snake_case)]
 #[interrupt]
-unsafe fn USBCTRL_IRQ() {
-    let usb_dev = USB_DEVICE.as_mut().unwrap();
-    let usb_hid = USB_HID.as_mut().unwrap();
+fn USBCTRL_IRQ() {
+    critical_section::with(|cs| {
+        let mut usb = USB.borrow_ref_mut(cs);
+        let Some(Usb { device: usb_dev, hid: usb_hid }) = usb.as_mut() else {
+            return;
+        };
 
-    if usb_dev.poll(&mut [usb_hid]) {
-        usb_hid.poll();
-    }
+        if usb_dev.poll(&mut [usb_hid]) {
+            usb_hid.poll();
+        }
 
-    let report = critical_section::with(|cs| *KEYBOARD_REPORT.borrow_ref(cs));
-    if let Err(err) = usb_hid.push_input(&report) {
+        let report = *KEYBOARD_REPORT.borrow_ref(cs);
+        handle_usb_io(usb_hid, &report);
+
+        // Wake the host if a key is pressed and the device supports
+        // remote wakeup.
+        if !report_is_empty(&report)
+            && usb_dev.state() == UsbDeviceState::Suspend
+            && usb_dev.remote_wakeup_enabled()
+        {
+            usb_dev.bus().remote_wakeup();
+        }
+    });
+}
+
+/// Push the latest keyboard report to the host and drain any output report (e.g. LED state).
+fn handle_usb_io(usb_hid: &HIDClass<'static, usb::UsbBus>, report: &KeyboardReport) {
+    if let Err(err) = usb_hid.push_input(report) {
         match err {
             UsbError::WouldBlock => warn!("UsbError::WouldBlock"),
             UsbError::ParseError => error!("UsbError::ParseError"),
@@ -239,15 +250,6 @@ unsafe fn USBCTRL_IRQ() {
     // macOS doesn't like it when you don't pull this, apparently.
     // TODO: maybe even parse something here
     usb_hid.pull_raw_output(&mut [0; 64]).ok();
-
-    // Wake the host if a key is pressed and the device supports
-    // remote wakeup.
-    if !report_is_empty(&report)
-        && usb_dev.state() == UsbDeviceState::Suspend
-        && usb_dev.remote_wakeup_enabled()
-    {
-        usb_dev.bus().remote_wakeup();
-    }
 }
 
 fn report_is_empty(report: &KeyboardReport) -> bool {
